@@ -140,7 +140,8 @@ class SlowDispatchPrediction:
 
     def predictSlowDispatchBatch(self, return_dict=False):
         """
-        This function predicts in batches, this can raise errors so best used in a try/except block
+        This function can be used for faster predictions when batches are passed, this can fail if the encoder encounter
+        unknown data, use this with caution, recommended using within try/except block
 
         :param return_dict: if True returns a dictionary with the predicted classes and the probabilities
                 for the classes
@@ -160,6 +161,9 @@ class SlowDispatchPrediction:
         else:
             print("Data has not been passed to the object, please use loadData(data_path)")
             return None
+
+    def loadDataFromBigQuery(self):
+        pass
 
     def predictSequentially(self, output_csv=False):
         """
