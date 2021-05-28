@@ -4,20 +4,23 @@ import pandas as pd
 import numpy as np
 import os
 
+import google.auth
+from google.cloud import bigquery
+from google.cloud import bigquery_storage
+
 
 # TODO: Refactor docstrings for the class, add better explanations
 # TODO: Add better error handling for the functions
 # TODO: Output a requirements.txt file
-# TODO: Plan and implement a way to update/train the model remotely
 # TODO: Implement loading data to a dataframe from sql
 
-class SlowDispatchPrediction:
+class SlowDispatchPredictionModel:
     def __init__(self, model_path=None, encoder_path=None, data_path=None):
         """
-            model_path=None - or the string path of the model
-            encoder_path=None - or the string path of the encoder
-            data=None - the pandas DataFrame object of the data
-            
+        model_path=None - or the string path of the model encoder_path=None - or the string path of the encoder
+        data_path=None - the path to the data file (csv, json, xlsx, xls, [odf, ods, odt] - Libre office formats)
+        recommended to always use csv
+
             The model, encoder and data can be loaded at a later time using the support functions
             - loadModel
             - loadEncoder
@@ -73,6 +76,7 @@ class SlowDispatchPrediction:
 
         # Private variable of the encoded version of the data
         self._encoded_data = None
+        self._dispatch_nums = None
 
         # Sanitize the data for prediction and encoding
         if data_path is not None:
@@ -105,7 +109,7 @@ class SlowDispatchPrediction:
         Performs data sanitization by replacing missing values for categorical with "NULL" and "0" for numerical.
         """
         if self.data is not None:
-            cat_obj = "object"
+            cat_obj = 'object'
             categorical = self.data.select_dtypes(include=cat_obj)
             numerics = ['int16', 'int32', 'int64', 'float16', 'float32', 'float64']
             numerical = self.data.select_dtypes(include=numerics)
@@ -162,8 +166,129 @@ class SlowDispatchPrediction:
             print("Data has not been passed to the object, please use loadData(data_path)")
             return None
 
-    def loadDataFromBigQuery(self):
-        pass
+    def loadDataFromBigQuery(self, query_string=None):
+        # Explicitly create a credentials object. This allows you to use the same
+        # credentials for both the BigQuery and BigQuery Storage clients, avoiding
+        # unnecessary API calls to fetch duplicate authentication tokens.
+
+        if query_string is None:
+            query_string = """
+            select
+            DISPATCH_NUM,
+            HEADER_SVC_BU_ID,
+            HEADER_DSPCH_ORD_BU_ID,
+            TECH_DRCT_FLG,
+            B2C_FLG,
+            B2D_FLG,
+            DUMMY_SVC_TAG_FLG,
+            NEW_PART_SHIP_FLG,
+            SHIP_SVC_BU_ID,
+            ITM_QTY,
+            ITM_COMDTY_ID,
+            PART_ORD_SEQ_NBR,
+            PART_ORD_LN_NBR,
+            NEW_PART_FLG,
+            SUBSTT_FLG,
+            TMZN_LOC_ID,
+            DW_LD_GRP_VAL,
+            ITM_COST,
+            ISS_CODE,
+            COST,
+            TWO_WEEK_TR,
+            SPMD_FBSC,
+            OneCost,
+            COUNTRY,
+            SOURCE,
+            DISPATCH_TYPE,
+            CALL_TYPE,
+            REASON_CODE,
+            STATUS,
+            PARTS_STATUS,
+            LOCAL_CHANNEL,
+            SVC_TYPE,
+            SVC_LEVEL,
+            SVC_OPTIONS,
+            PROD_TYPE_DESC,
+            PROD_GRP_DESC,
+            LOB_CODE,
+            LOB_DESC,
+            PROD_LN_DESC,
+            SYS_CLASS,
+            ZIP_SHIPPING,
+            KYHD,
+            ACCIDENTAL_DAMAGE,
+            COMPLETE_CARE,
+            TAX_XMPTN_FLG,
+            CURRENCY_CODE,
+            KYC,
+            ITM_NBR,
+            DSPCH_ORD_STAT_CD,
+            MOST_XPSV_PART_FLG,
+            DSTRB_HUB_NM,
+            PART_TYPE_CD,
+            ITEM_NUM,
+            ITEM_DESC,
+            AGE_CLASS,
+            COMMODITY,
+            COMMODITY_DESC,
+            ASP_FAMILY,
+            RFC,
+            REPAIR,
+            RSL_ACTIVE_FLAG,
+            BOM_Parent_Part,
+            AMER_PLNR_NAME,
+            EMEA_PLNR_NAME,
+            APJ_PLNR_NAME,
+            FULFIL_CENTER,
+            SPMD_ACTIVE_FLAG,
+            SPMD_COMMODITY,
+
+            if(coalesce(LENGTH(RCV_TRAN_DATE),0) < 3 and coalesce(LENGTH(X_ISP_RTNED_DTS),0) < 3, 1, 0) as not_returned, 
+            DATE_DIFF(DATE(IF(coalesce(LENGTH(RCV_TRAN_DATE),0) < 3, 
+                          IF(coalesce(LENGTH(X_ISP_RTNED_DTS),0) < 3, CURRENT_TIMESTAMP(), TIMESTAMP(X_ISP_RTNED_DTS)), 
+                          PARSE_TIMESTAMP("%m/%d/%Y %I:%M:%S %p",REPLACE(RCV_TRAN_DATE,"'","")))),
+                  DATE(DBR_CL_DATES_1_O), DAY) AS velocity,
+            if(DATE_DIFF(DATE(IF(coalesce(LENGTH(RCV_TRAN_DATE),0) < 3, 
+                          IF(coalesce(LENGTH(X_ISP_RTNED_DTS),0) < 3, CURRENT_TIMESTAMP(), TIMESTAMP(X_ISP_RTNED_DTS)), 
+                          PARSE_TIMESTAMP("%m/%d/%Y %I:%M:%S %p",REPLACE(RCV_TRAN_DATE,"'","")))),
+                     DATE(DBR_CL_DATES_1_O), DAY)   
+            < 31, 0, 1) as slow_30_dispatch,
+            if(DATE_DIFF(DATE(IF(coalesce(LENGTH(RCV_TRAN_DATE),0) < 3, 
+                          IF(coalesce(LENGTH(X_ISP_RTNED_DTS),0) < 3, CURRENT_TIMESTAMP(), TIMESTAMP(X_ISP_RTNED_DTS)), 
+                          PARSE_TIMESTAMP("%m/%d/%Y %I:%M:%S %p",REPLACE(RCV_TRAN_DATE,"'","")))),
+                     DATE(DBR_CL_DATES_1_O), DAY)   
+            < 41, 0, 1) as slow_40_dispatch,
+            if(DATE_DIFF(DATE(IF(coalesce(LENGTH(RCV_TRAN_DATE),0) < 3, 
+                          IF(coalesce(LENGTH(X_ISP_RTNED_DTS),0) < 3, CURRENT_TIMESTAMP(), TIMESTAMP(X_ISP_RTNED_DTS)), 
+                          PARSE_TIMESTAMP("%m/%d/%Y %I:%M:%S %p",REPLACE(RCV_TRAN_DATE,"'","")))),
+                     DATE(DBR_CL_DATES_1_O), DAY)   
+            < 51, 0, 1) as slow_50_dispatch,
+            if(DATE_DIFF(DATE(IF(coalesce(LENGTH(RCV_TRAN_DATE),0) < 3, 
+                          IF(coalesce(LENGTH(X_ISP_RTNED_DTS),0) < 3, CURRENT_TIMESTAMP(), TIMESTAMP(X_ISP_RTNED_DTS)), 
+                          PARSE_TIMESTAMP("%m/%d/%Y %I:%M:%S %p",REPLACE(RCV_TRAN_DATE,"'","")))),
+                     DATE(DBR_CL_DATES_1_O), DAY)   
+            < 61, 0, 1) as slow_60_dispatch
+
+            FROM `dandsltd-warehouse.dellfloat.F_DISPATCH_HEADER` 
+            INNER JOIN `dandsltd-warehouse.dellfloat.F_DISPATCH_SHIP` on DISPATCH_NUM = SVC_DSPCH_ID
+            INNER JOIN `dandsltd-warehouse.dellfloat.F_ITEM_MASTER_NEW` on ITM_NBR = ITEM_NUM
+            INNER JOIN `dandsltd-warehouse.warehouse.p_invoices` on DISPATCH_NUM = dbr_cli_ref_no and ITM_NBR = DBR_CL_MISC_1
+            LEFT JOIN `dandsltd-warehouse.dellfloat.F_DISPATCH_RCV` on SVC_DSPCH_ID = X_ISP_DSPCH_NBR and ITEM_NUM = X_ISP_PART_NBR
+            LEFT JOIN `dandsltd-warehouse.dellfloat.F_DATA_LAKE_FILE` ON SVC_DSPCH_ID = dps_number AND DBR_CL_MISC_1 = part_number
+
+
+            where SHIPD_DT >= '2021-04-01' and SHIPD_DT < '2021-04-31'
+            and `dandsltd-warehouse.warehouse.p_invoices`._PARTITIONTIME = (select max(_PARTITIONTIME) from `dandsltd-warehouse.warehouse.p_invoices`)
+            and `dandsltd-warehouse.warehouse.p_invoices`.dbr_client in ('DELL68','DELL94','DELLT1')
+            """
+        else:
+            query_string = query_string
+
+        pd.set_option("display.max_columns", None)
+        bqclient = bigquery.Client.from_service_account_json('./credentials.json')
+        dataframe = bqclient.query(query_string).to_dataframe()
+        self.data = pd.DataFrame(dataframe)
+        self._dispatch_nums = self.data["DISPATCH_NUM"]
 
     def predictSequentially(self, output_csv=False):
         """
@@ -178,7 +303,8 @@ class SlowDispatchPrediction:
         results = {
             "rows": [],  # Contains the indexes of the rows that had errors
             "classes": [],
-            "probability": []
+            "probability": [],
+            "dispatch_nums": []
         }
 
         # Sanitize data
@@ -187,16 +313,19 @@ class SlowDispatchPrediction:
 
         slice_index = 0
 
-        for index, row in self.data.iterrows():
+        for (index, row), dispatch in zip(self.data.iterrows(), self._dispatch_nums):
+            print(dispatch)
             try:
-                encoded = self._encoded_data = self._encoder.transform(self.data[slice_index:slice_index+1])
+                encoded = self._encoder.transform(self.data[slice_index:slice_index + 1])
                 results["classes"].append((self._model.predict(encoded) > 0.5).astype("int32")[0][0])
                 results["probability"].append((self._model.predict(encoded))[0][0])
                 results["rows"].append(index)
+                results["dispatch_nums"].append(dispatch)
             except Exception as e:
                 results["rows"].append(index)
                 results["classes"].append("ERROR")
                 results["probability"].append("ERROR")
+                results["dispatch_nums"].append(dispatch)
 
             # Increment slice index in order to move to the next row of data
             slice_index += 1
@@ -206,11 +335,15 @@ class SlowDispatchPrediction:
         else:
             self.data["SLOW_DISPATCH"] = results["classes"]
             self.data["PROBABILITY"] = results["probability"]
+            self.data["DISPATCH_NUM"] = results["dispatch_nums"]
             self.data.to_csv("./predictions.csv", index=False)
 
     def printDataInfo(self):
         print(f"Shape {self.data.shape}")
         print(self.data.head())
+
+    # Implement transformation from query result to dataframe
+    # Save the query in this file
 
     def __str__(self):
         return str(self._model.summary())
