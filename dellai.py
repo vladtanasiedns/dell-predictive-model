@@ -2,6 +2,7 @@ from tensorflow import keras
 from joblib import load
 import pandas as pd
 import numpy as np
+import csv
 import os
 
 import google.auth
@@ -277,7 +278,7 @@ class SlowDispatchPredictionModel:
             LEFT JOIN `dandsltd-warehouse.dellfloat.F_DATA_LAKE_FILE` ON SVC_DSPCH_ID = dps_number AND DBR_CL_MISC_1 = part_number
 
 
-            where SHIPD_DT >= '2021-04-01' and SHIPD_DT < '2021-04-31'
+            where cast(`dandsltd-warehouse.dellfloat.F_DISPATCH_HEADER`.p2 as DATE) = CURRENT_DATE()            
             and `dandsltd-warehouse.warehouse.p_invoices`._PARTITIONTIME = (select max(_PARTITIONTIME) from `dandsltd-warehouse.warehouse.p_invoices`)
             and `dandsltd-warehouse.warehouse.p_invoices`.dbr_client in ('DELL68','DELL94','DELLT1')
             """
@@ -317,7 +318,8 @@ class SlowDispatchPredictionModel:
             print(dispatch)
             try:
                 encoded = self._encoder.transform(self.data[slice_index:slice_index + 1])
-                results["classes"].append((self._model.predict(encoded) > 0.5).astype("int32")[0][0])
+                prediction = (self._model.predict(encoded) > 0.5).astype("int32")[0][0]
+                results["classes"].append("Y" if prediction > 0.5 else "N")
                 results["probability"].append((self._model.predict(encoded))[0][0])
                 results["rows"].append(index)
                 results["dispatch_nums"].append(dispatch)
@@ -336,7 +338,7 @@ class SlowDispatchPredictionModel:
             self.data["SLOW_DISPATCH"] = results["classes"]
             self.data["PROBABILITY"] = results["probability"]
             self.data["DISPATCH_NUM"] = results["dispatch_nums"]
-            self.data.to_csv("./predictions.csv", index=False)
+            self.data.to_csv("./predictions.csv", index=False, quoting=csv.QUOTE_ALL)
 
     def printDataInfo(self):
         print(f"Shape {self.data.shape}")
